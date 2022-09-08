@@ -1,5 +1,4 @@
 import importlib
-import re
 
 from drf_spectacular.drainage import reset_generator_stats
 from drf_spectacular.generators import SchemaGenerator as _OpenAPISchemaGenerator

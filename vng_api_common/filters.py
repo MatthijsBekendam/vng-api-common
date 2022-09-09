@@ -3,10 +3,12 @@ from urllib.parse import urlencode, urlparse
 
 from django.core.exceptions import ValidationError
 from django.core.validators import URLValidator
-from django.db import models
+from django.db.models import ForeignObjectRel
+from django.db.models.fields.related_descriptors import ForwardManyToOneDescriptor, ReverseOneToOneDescriptor, \
+    ReverseManyToOneDescriptor, ManyToManyDescriptor
 from django.forms.widgets import URLInput
-from django.http import QueryDict
 from django.utils.translation import gettext_lazy as _
+from typing import List
 
 from django_filters import fields, filters
 from django_filters.constants import EMPTY_VALUES
@@ -31,7 +33,8 @@ from drf_spectacular.drainage import add_trace_message, get_override, has_overri
 from drf_spectacular.extensions import OpenApiFilterExtension
 from drf_spectacular.plumbing import (
     build_array_type, build_basic_type, build_parameter_type, follow_field_source, get_type_hints,
-    get_view_model, is_basic_type,
+    get_view_model, is_basic_type, _follow_return_type, CACHED_PROPERTY_FUNCS,
+    UnableToProceedError
 )
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter
@@ -83,7 +86,8 @@ class Backend(DjangoFilterBackend):
         filter_choices = self._get_explicit_filter_choices(filter_field)
         schema_from_override = False
 
-        if has_override(filter_field, 'field') or has_override(filter_method, 'field'):
+
+        if has_override(filter_field, 'field') or has_override(filter_field, 'field'):
             schema_from_override = True
             annotation = (
                 get_override(filter_field, 'field') or get_override(filter_method, 'field')
@@ -98,10 +102,15 @@ class Backend(DjangoFilterBackend):
                 schema = build_basic_type(filter_method_hint)
             else:
                 schema = build_basic_type(OpenApiTypes.STR)
+
         elif isinstance(filter_field, tuple(unambiguous_mapping)):
+
             for cls in filter_field.__class__.__mro__:
                 if cls in unambiguous_mapping:
-                    schema = build_basic_type(unambiguous_mapping[cls])
+                    try:
+                        schema = self._get_schema_from_model_field(auto_schema, filter_field, model)
+                    except:
+                        schema = build_basic_type(unambiguous_mapping[cls])
                     break
         elif isinstance(filter_field, (filters.NumberFilter, filters.NumericRangeFilter)):
             # NumberField is underspecified by itself. try to find the
@@ -118,6 +127,7 @@ class Backend(DjangoFilterBackend):
         elif isinstance(filter_field, (filters.ChoiceFilter, filters.MultipleChoiceFilter)):
             try:
                 schema = self._get_schema_from_model_field(auto_schema, filter_field, model)
+
             except Exception:
                 if filter_choices and is_basic_type(type(filter_choices[0])):
                     # fallback to type guessing from first choice element
@@ -236,6 +246,85 @@ class Backend(DjangoFilterBackend):
             qs = auto_schema.view.get_queryset()
             model_field = qs.query.annotations[filter_field.field_name].field
         return auto_schema._map_model_field(model_field, direction=None)
+
+def _follow_field_source(model, path: List[str]):
+    """
+        navigate through root model via given navigation path. supports forward/reverse relations.
+    """
+    field_or_property = getattr(model, path[0], None)
+    if len(path) == 1:
+        # end of traversal
+        if isinstance(field_or_property, property):
+            return field_or_property.fget
+        elif isinstance(field_or_property, CACHED_PROPERTY_FUNCS):
+            return field_or_property.func
+        elif callable(field_or_property):
+            return field_or_property
+        elif isinstance(field_or_property, ManyToManyDescriptor):
+            if field_or_property.reverse:
+                return field_or_property.rel.target_field  # m2m reverse
+            else:
+                return field_or_property.field.target_field  # m2m forward
+        elif isinstance(field_or_property, ReverseOneToOneDescriptor):
+            return field_or_property.related.target_field  # o2o reverse
+        elif isinstance(field_or_property, ReverseManyToOneDescriptor):
+            return field_or_property.rel.target_field  # type: ignore # foreign reverse
+        elif isinstance(field_or_property, ForwardManyToOneDescriptor):
+            return field_or_property.field  # type: ignore # o2o & foreign forward
+        else:
+            field = model._meta.get_field(path[0])
+            if isinstance(field, ForeignObjectRel):
+                # case only occurs when relations are traversed in reverse and
+                # not via the related_name (default: X_set) but the model name.
+                return field.target_field
+            else:
+                return field
+    else:
+        if (
+            isinstance(field_or_property, (property,) + CACHED_PROPERTY_FUNCS)
+            or callable(field_or_property)
+        ):
+            if isinstance(field_or_property, property):
+                target_model = _follow_return_type(field_or_property.fget)
+            elif isinstance(field_or_property, CACHED_PROPERTY_FUNCS):
+                target_model = _follow_return_type(field_or_property.func)
+            else:
+                target_model = _follow_return_type(field_or_property)
+            if not target_model:
+                raise UnableToProceedError(
+                    f'could not follow field source through intermediate property "{path[0]}" '
+                    f'on model {model}. Please add a type hint on the model\'s property/function '
+                    f'to enable traversal of the source path "{".".join(path)}".'
+                )
+            return _follow_field_source(target_model, path[1:])
+        else:
+            target_model = model._meta.get_field(path[0]).related_model
+            return _follow_field_source(target_model, path[1:])
+
+def follow_field_source(model, path, emit_warnings=True):
+    """
+    a model traversal chain "foreignkey.foreignkey.value" can either end with an actual model field
+    instance "value" or a model property function named "value". differentiate the cases.
+
+    :return: models.Field or function object
+    """
+    try:
+        return _follow_field_source(model, path)
+    except UnableToProceedError as e:
+        if emit_warnings:
+            warn(e)
+    except Exception as exc:
+        if emit_warnings:
+            warn(
+                f'could not resolve field on model {model} with path "{".".join(path)}". '
+                f'This is likely a custom field that does some unknown magic. Maybe '
+                f'consider annotating the field/property? Defaulting to "string". (Exception: {exc})'
+            )
+
+    def dummy_property(obj) -> str:
+        pass  # pragma: no cover
+
+    return dummy_property
 
     # Taken from drf_yasg.inspectors.field.CamelCaseJSONFilter
     # def _is_camel_case(self, view):

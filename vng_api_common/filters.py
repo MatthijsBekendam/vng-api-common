@@ -1,13 +1,13 @@
 import logging
+from typing import List
 from urllib.parse import urlencode, urlparse
 
 from django.core.exceptions import ValidationError
 from django.core.validators import URLValidator
-from django.db.models.fields.related_descriptors import ForwardManyToOneDescriptor,
+from django.db.models.fields.related_descriptors import ForwardManyToOneDescriptor
 from django.forms.widgets import URLInput
 from django.http import QueryDict
 from django.utils.translation import gettext_lazy as _
-from typing import List
 
 from django_filters import fields, filters
 from django_filters.constants import EMPTY_VALUES
@@ -26,12 +26,17 @@ from .validators import validate_rsin
 logger = logging.getLogger(__name__)
 
 from django.db import models
-from django_filters import filters
 
+from django_filters import filters
 from drf_spectacular.drainage import add_trace_message, get_override, has_override, warn
 from drf_spectacular.plumbing import (
-    build_array_type, build_basic_type, build_parameter_type, follow_field_source, get_type_hints,
-    get_view_model, is_basic_type
+    build_array_type,
+    build_basic_type,
+    build_parameter_type,
+    follow_field_source,
+    get_type_hints,
+    get_view_model,
+    is_basic_type,
 )
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter

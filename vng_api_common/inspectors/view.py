@@ -44,9 +44,9 @@ DEFAULT_ACTION_ERRORS = {
     "list": COMMON_ERRORS,
     "retrieve": COMMON_ERRORS + [exceptions.NotFound],
     "update": COMMON_ERRORS
-              + [exceptions.ParseError, exceptions.ValidationError, exceptions.NotFound],
+    + [exceptions.ParseError, exceptions.ValidationError, exceptions.NotFound],
     "partial_update": COMMON_ERRORS
-                      + [exceptions.ParseError, exceptions.ValidationError, exceptions.NotFound],
+    + [exceptions.ParseError, exceptions.ValidationError, exceptions.NotFound],
     "destroy": COMMON_ERRORS + [exceptions.NotFound],
 }
 

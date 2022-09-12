@@ -3,10 +3,9 @@ from urllib.parse import urlencode, urlparse
 
 from django.core.exceptions import ValidationError
 from django.core.validators import URLValidator
-from django.db.models import ForeignObjectRel
-from django.db.models.fields.related_descriptors import ForwardManyToOneDescriptor, ReverseOneToOneDescriptor, \
-    ReverseManyToOneDescriptor, ManyToManyDescriptor
+from django.db.models.fields.related_descriptors import ForwardManyToOneDescriptor,
 from django.forms.widgets import URLInput
+from django.http import QueryDict
 from django.utils.translation import gettext_lazy as _
 from typing import List
 
@@ -25,16 +24,14 @@ from .utils import NotAViewSet, get_resource_for_path
 from .validators import validate_rsin
 
 logger = logging.getLogger(__name__)
-from drf_spectacular.contrib.django_filters import DjangoFilterExtension
 
 from django.db import models
+from django_filters import filters
 
 from drf_spectacular.drainage import add_trace_message, get_override, has_override, warn
-from drf_spectacular.extensions import OpenApiFilterExtension
 from drf_spectacular.plumbing import (
     build_array_type, build_basic_type, build_parameter_type, follow_field_source, get_type_hints,
-    get_view_model, is_basic_type, _follow_return_type, CACHED_PROPERTY_FUNCS,
-    UnableToProceedError
+    get_view_model, is_basic_type
 )
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter
@@ -42,7 +39,6 @@ from drf_spectacular.utils import OpenApiParameter
 _NoHint = object()
 
 class Backend(DjangoFilterBackend):
-    target_class = 'django_filters.rest_framework.DjangoFilterBackend'
 
     def get_schema_operation_parameters(self, auto_schema, *args, **kwargs):
 
@@ -58,14 +54,12 @@ class Backend(DjangoFilterBackend):
         result = []
         with add_trace_message(filterset_class.__name__):
             for field_name, filter_field in filterset_class.base_filters.items():
-                result += self.resolve_filter_field(
-                    auto_schema, model, filterset_class, field_name, filter_field
-                )
+                    result += self.resolve_filter_field(
+                        auto_schema, model, filterset_class, field_name, filter_field
+                    )
         return result
 
     def resolve_filter_field(self, auto_schema, model, filterset_class, field_name, filter_field):
-        from django_filters import filters
-
         unambiguous_mapping = {
             filters.CharFilter: OpenApiTypes.STR,
             filters.BooleanFilter: OpenApiTypes.BOOL,
@@ -86,7 +80,6 @@ class Backend(DjangoFilterBackend):
         filter_choices = self._get_explicit_filter_choices(filter_field)
         schema_from_override = False
 
-
         if has_override(filter_field, 'field') or has_override(filter_field, 'field'):
             schema_from_override = True
             annotation = (
@@ -104,14 +97,15 @@ class Backend(DjangoFilterBackend):
                 schema = build_basic_type(OpenApiTypes.STR)
 
         elif isinstance(filter_field, tuple(unambiguous_mapping)):
-
             for cls in filter_field.__class__.__mro__:
                 if cls in unambiguous_mapping:
                     try:
                         schema = self._get_schema_from_model_field(auto_schema, filter_field, model)
+                        break
                     except:
                         schema = build_basic_type(unambiguous_mapping[cls])
-                    break
+                        break
+
         elif isinstance(filter_field, (filters.NumberFilter, filters.NumericRangeFilter)):
             # NumberField is underspecified by itself. try to find the
             # type that makes the most sense or default to generic NUMBER
@@ -233,7 +227,7 @@ class Backend(DjangoFilterBackend):
         if not filter_field.field_name:
             return None
         path = filter_field.field_name.split('__')
-        return follow_field_source(model, path, emit_warnings=False)
+        return follow_field_source_modified(model, path)
 
     def _get_schema_from_model_field(self, auto_schema, filter_field, model):
         # Has potential to throw exceptions. Needs to be wrapped in try/except!
@@ -241,130 +235,73 @@ class Backend(DjangoFilterBackend):
         # first search for the field in the model as this has the least amount of
         # potential side effects. Only after that fails, attempt to call
         # get_queryset() to check for potential query annotations.
+
         model_field = self._get_model_field(filter_field, model)
         if not isinstance(model_field, models.Field):
             qs = auto_schema.view.get_queryset()
             model_field = qs.query.annotations[filter_field.field_name].field
         return auto_schema._map_model_field(model_field, direction=None)
 
-def _follow_field_source(model, path: List[str]):
+    # Taken from drf_yasg.inspectors.field.CamelCaseJSONFilter
+    def _is_camel_case(self, view):
+        return any(
+            issubclass(parser, CamelCaseJSONParser) for parser in view.parser_classes
+        ) or any(
+            issubclass(renderer, CamelCaseJSONRenderer)
+            for renderer in view.renderer_classes
+        )
+
+    def _transform_query_params(self, view, query_params: QueryDict) -> QueryDict:
+        if not self._is_camel_case(view):
+            return query_params
+
+        # data can be a regular dict if it's coming from a serializer
+        if hasattr(query_params, "lists"):
+            data = dict(query_params.lists())
+        else:
+            data = query_params
+
+        transformed = underscoreize(data)
+
+        return QueryDict(urlencode(transformed, doseq=True))
+
+    def get_filterset_kwargs(
+        self, request: Request, queryset: models.QuerySet, view: APIView
+    ):
+        """
+        Get the initialization parameters for the filterset.
+
+        * filter on request.data if request.query_params is empty
+        * do the camelCase transformation of filter parameters
+        """
+        kwargs = super().get_filterset_kwargs(request, queryset, view)
+        filter_parameters = (
+            request.query_params if not is_search_view(view) else request.data
+        )
+        query_params = self._transform_query_params(view, filter_parameters)
+        kwargs["data"] = query_params
+        return kwargs
+
+
+def _follow_field_source_modified(model, path: List[str]):
     """
-        navigate through root model via given navigation path. supports forward/reverse relations.
+     extends drf-spectacular/plumbing/_follow_field_source
     """
     field_or_property = getattr(model, path[0], None)
     if len(path) == 1:
-        # end of traversal
-        if isinstance(field_or_property, property):
-            return field_or_property.fget
-        elif isinstance(field_or_property, CACHED_PROPERTY_FUNCS):
-            return field_or_property.func
-        elif callable(field_or_property):
-            return field_or_property
-        elif isinstance(field_or_property, ManyToManyDescriptor):
-            if field_or_property.reverse:
-                return field_or_property.rel.target_field  # m2m reverse
-            else:
-                return field_or_property.field.target_field  # m2m forward
-        elif isinstance(field_or_property, ReverseOneToOneDescriptor):
-            return field_or_property.related.target_field  # o2o reverse
-        elif isinstance(field_or_property, ReverseManyToOneDescriptor):
-            return field_or_property.rel.target_field  # type: ignore # foreign reverse
-        elif isinstance(field_or_property, ForwardManyToOneDescriptor):
+        if isinstance(field_or_property, ForwardManyToOneDescriptor):
             return field_or_property.field  # type: ignore # o2o & foreign forward
-        else:
-            field = model._meta.get_field(path[0])
-            if isinstance(field, ForeignObjectRel):
-                # case only occurs when relations are traversed in reverse and
-                # not via the related_name (default: X_set) but the model name.
-                return field.target_field
-            else:
-                return field
+    return
+
+def follow_field_source_modified(model, path):
+    """
+    extends drf-spectacular/plumbing/follow_field_source
+    """
+    field = _follow_field_source_modified(model, path)
+    if field:
+        return field
     else:
-        if (
-            isinstance(field_or_property, (property,) + CACHED_PROPERTY_FUNCS)
-            or callable(field_or_property)
-        ):
-            if isinstance(field_or_property, property):
-                target_model = _follow_return_type(field_or_property.fget)
-            elif isinstance(field_or_property, CACHED_PROPERTY_FUNCS):
-                target_model = _follow_return_type(field_or_property.func)
-            else:
-                target_model = _follow_return_type(field_or_property)
-            if not target_model:
-                raise UnableToProceedError(
-                    f'could not follow field source through intermediate property "{path[0]}" '
-                    f'on model {model}. Please add a type hint on the model\'s property/function '
-                    f'to enable traversal of the source path "{".".join(path)}".'
-                )
-            return _follow_field_source(target_model, path[1:])
-        else:
-            target_model = model._meta.get_field(path[0]).related_model
-            return _follow_field_source(target_model, path[1:])
-
-def follow_field_source(model, path, emit_warnings=True):
-    """
-    a model traversal chain "foreignkey.foreignkey.value" can either end with an actual model field
-    instance "value" or a model property function named "value". differentiate the cases.
-
-    :return: models.Field or function object
-    """
-    try:
-        return _follow_field_source(model, path)
-    except UnableToProceedError as e:
-        if emit_warnings:
-            warn(e)
-    except Exception as exc:
-        if emit_warnings:
-            warn(
-                f'could not resolve field on model {model} with path "{".".join(path)}". '
-                f'This is likely a custom field that does some unknown magic. Maybe '
-                f'consider annotating the field/property? Defaulting to "string". (Exception: {exc})'
-            )
-
-    def dummy_property(obj) -> str:
-        pass  # pragma: no cover
-
-    return dummy_property
-
-    # Taken from drf_yasg.inspectors.field.CamelCaseJSONFilter
-    # def _is_camel_case(self, view):
-    #     return any(
-    #         issubclass(parser, CamelCaseJSONParser) for parser in view.parser_classes
-    #     ) or any(
-    #         issubclass(renderer, CamelCaseJSONRenderer)
-    #         for renderer in view.renderer_classes
-    #     )
-    #
-    # def _transform_query_params(self, view, query_params: QueryDict) -> QueryDict:
-    #     if not self._is_camel_case(view):
-    #         return query_params
-    #
-    #     # data can be a regular dict if it's coming from a serializer
-    #     if hasattr(query_params, "lists"):
-    #         data = dict(query_params.lists())
-    #     else:
-    #         data = query_params
-    #
-    #     transformed = underscoreize(data)
-    #
-    #     return QueryDict(urlencode(transformed, doseq=True))
-    #
-    # def get_filterset_kwargs(
-    #     self, request: Request, queryset: models.QuerySet, view: APIView
-    # ):
-    #     """
-    #     Get the initialization parameters for the filterset.
-    #
-    #     * filter on request.data if request.query_params is empty
-    #     * do the camelCase transformation of filter parameters
-    #     """
-    #     kwargs = super().get_filterset_kwargs(request, queryset, view)
-    #     filter_parameters = (
-    #         request.query_params if not is_search_view(view) else request.data
-    #     )
-    #     query_params = self._transform_query_params(view, filter_parameters)
-    #     kwargs["data"] = query_params
-    #     return kwargs
+        return follow_field_source(model, path, emit_warnings=False)
 
 
 class URLModelChoiceField(fields.ModelChoiceField):

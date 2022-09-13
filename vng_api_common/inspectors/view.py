@@ -5,6 +5,7 @@ from django.apps import apps
 from django.utils.translation import gettext, gettext_lazy as _
 
 from drf_spectacular import openapi
+from drf_spectacular.extensions import OpenApiFilterExtension
 from drf_spectacular.plumbing import (
     build_basic_type,
     build_examples_list,
@@ -388,3 +389,13 @@ class AutoSchema(openapi.AutoSchema):
             del parameter_type["in"]
             result[parameter.name] = parameter_type
         return result
+
+    def _get_filter_parameters(self):
+        parameters = []
+        for filter_backend in self.get_filter_backends():
+            filter_extension = OpenApiFilterExtension.get_match(filter_backend())
+            if filter_extension:
+                parameters += filter_extension.get_schema_operation_parameters(self)
+            else:
+                parameters += filter_backend().get_schema_operation_parameters(self)
+        return parameters

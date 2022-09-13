@@ -45,23 +45,21 @@ _NoHint = object()
 
 class Backend(DjangoFilterBackend):
 
-    def get_schema_operation_parameters(self, auto_schema, *args, **kwargs):
-
+    def get_schema_operation_parameters(self, auto_schema):
         model = get_view_model(auto_schema.view)
         if not model:
             return []
 
-        filterset_class = self.get_filterset_class(auto_schema.view,  auto_schema.view.get_queryset())
-
+        filterset_class = self.get_filterset_class(auto_schema.view, auto_schema.view.get_queryset())
         if not filterset_class:
             return []
 
         result = []
         with add_trace_message(filterset_class.__name__):
             for field_name, filter_field in filterset_class.base_filters.items():
-                    result += self.resolve_filter_field(
-                        auto_schema, model, filterset_class, field_name, filter_field
-                    )
+                result += self.resolve_filter_field(
+                    auto_schema, model, filterset_class, field_name, filter_field
+                )
         return result
 
     def resolve_filter_field(self, auto_schema, model, filterset_class, field_name, filter_field):
@@ -84,7 +82,6 @@ class Backend(DjangoFilterBackend):
         filter_method_hint = self._get_filter_method_hint(filter_method)
         filter_choices = self._get_explicit_filter_choices(filter_field)
         schema_from_override = False
-
         if has_override(filter_field, 'field') or has_override(filter_field, 'field'):
             schema_from_override = True
             annotation = (
@@ -123,9 +120,12 @@ class Backend(DjangoFilterBackend):
                 schema = build_basic_type(OpenApiTypes.NUMBER)  # TODO may be improved
             else:
                 schema = build_basic_type(OpenApiTypes.NUMBER)
+
         elif isinstance(filter_field, (filters.ChoiceFilter, filters.MultipleChoiceFilter)):
             try:
                 schema = self._get_schema_from_model_field(auto_schema, filter_field, model)
+                if type(filter_field) == URLModelChoiceFilter:
+                    schema["type"] = filter_field.field_class.DRF_SPECTACULAR_INPUT_TYPE
 
             except Exception:
                 if filter_choices and is_basic_type(type(filter_choices[0])):
@@ -242,6 +242,7 @@ class Backend(DjangoFilterBackend):
         # get_queryset() to check for potential query annotations.
 
         model_field = self._get_model_field(filter_field, model)
+
         if not isinstance(model_field, models.Field):
             qs = auto_schema.view.get_queryset()
             model_field = qs.query.annotations[filter_field.field_name].field
@@ -298,6 +299,7 @@ def _follow_field_source_modified(model, path: List[str]):
             return field_or_property.field  # type: ignore # o2o & foreign forward
     return
 
+
 def follow_field_source_modified(model, path):
     """
     extends drf-spectacular/plumbing/follow_field_source
@@ -311,6 +313,7 @@ def follow_field_source_modified(model, path):
 
 class URLModelChoiceField(fields.ModelChoiceField):
     widget = URLInput
+    DRF_SPECTACULAR_INPUT_TYPE = "string <uri>"
 
     def __init__(self, *args, **kwargs):
         self.instance_path = kwargs.pop("instance_path", None)
